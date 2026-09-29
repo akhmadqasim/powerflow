@@ -8,7 +8,7 @@ use tauri::{
 use tauri_plugin_nspopover::{AppExt, WindowExt as _};
 use tauri_specta::Event;
 
-use crate::{event::PowerUpdatedEvent, ext::WebviewWindowExt, show_main_window};
+use crate::{event::PowerUpdatedEvent, ext::WebviewWindowExt, show_main_window, util::log_err};
 
 pub fn setup_tray_icon<R: Runtime>(app: &impl Manager<R>) -> tauri::Result<()> {
     let show = MenuItemBuilder::new("Show Window").build(app)?;
@@ -56,9 +56,10 @@ pub fn setup_tray_icon<R: Runtime>(app: &impl Manager<R>) -> tauri::Result<()> {
     });
 
     PowerUpdatedEvent::listen(app.app_handle(), move |event| {
-        if let Err(e) = tray_icon.set_title(Some(event.payload.0)) {
-            log::error!("failed to update tray title: {e}");
-        }
+        log_err(
+            tray_icon.set_title(Some(event.payload.0)),
+            "update tray title",
+        );
     });
 
     if let Some(popover) = app.popover_window() {
@@ -92,11 +93,13 @@ unsafe fn use_monospaced_digits_in_status_bar() {
         msg_send![menu_font, pointSize]
     };
     // NSFontWeightRegular
-    let font: id = msg_send![class!(NSFont), monospacedDigitSystemFontOfSize: font_size weight: 0.0f64];
+    let font: id =
+        msg_send![class!(NSFont), monospacedDigitSystemFontOfSize: font_size weight: 0.0f64];
     if font == nil {
         return;
     }
 
+    let mut found = false;
     for i in 0..count {
         let window: id = msg_send![windows, objectAtIndex: i];
         let is_status_window: BOOL = msg_send![window, isKindOfClass: status_window_class];
@@ -110,6 +113,10 @@ unsafe fn use_monospaced_digits_in_status_bar() {
         let is_button: BOOL = msg_send![view, isKindOfClass: button_class];
         if is_button != NO {
             let _: () = msg_send![view, setFont: font];
+            found = true;
         }
+    }
+    if !found {
+        log::warn!("status bar button not found; menu bar width may jitter");
     }
 }

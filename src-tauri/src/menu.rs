@@ -8,8 +8,6 @@ use tauri::{
 };
 use tauri_specta::Event;
 
-use crate::ext::WebviewWindowExt;
-
 #[derive(
     Debug,
     Clone,
@@ -73,14 +71,7 @@ pub fn setup_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
 pub fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
     // event.emit(app).unwrap();
     match event {
-        MenuEvent::Preferences => match app.get_or_create_window("settings") {
-            Ok((window, _)) => {
-                if let Err(e) = window.show() {
-                    log::error!("failed to show settings window: {e}");
-                }
-            }
-            Err(e) => log::error!("failed to create settings window: {e}"),
-        },
+        MenuEvent::Preferences => crate::open_settings_window(app),
         MenuEvent::Close => {
             app.exit(0);
         }

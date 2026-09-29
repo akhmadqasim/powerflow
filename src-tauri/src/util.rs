@@ -11,6 +11,13 @@ pub struct UnsafeWindowHandle(pub *mut std::ffi::c_void);
 unsafe impl Send for UnsafeWindowHandle {}
 unsafe impl Sync for UnsafeWindowHandle {}
 
+/// Log a failed fallible call instead of panicking on it.
+pub fn log_err<T, E: std::fmt::Display>(result: Result<T, E>, what: &str) {
+    if let Err(e) = result {
+        log::error!("failed to {what}: {e}");
+    }
+}
+
 pub fn position_traffic_lights(ns_window_handle: UnsafeWindowHandle, x: f64, y: f64) {
     use cocoa::{
         appkit::{NSView, NSWindow, NSWindowButton},

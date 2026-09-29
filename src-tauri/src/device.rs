@@ -39,8 +39,6 @@ pub struct DeviceMessage {
     action: Action,
 }
 
-/// Active remote connections keyed by UDID — at most one tick source per device
-/// so USB+WiFi dual attach does not double-feed history.
 struct ConnectedDevice {
     // Field order matters: the service connection must be invalidated before
     // the device session is torn down.
@@ -80,27 +78,21 @@ pub fn start_device_listener() -> mpsc::UnboundedReceiver<DeviceMessage> {
             log::error!("AMDeviceNotificationSubscribe failed: {result}");
             return;
         }
-        // Keep the Arc alive for the lifetime of the run loop.
-        let _keep = boxed;
+        // `boxed` stays alive (and the context pointer valid) because the run
+        // loop never returns.
         unsafe { CFRunLoopRun() };
     });
 
     rx
 }
 
-fn preferred_connection(
-    connections: &HashMap<InterfaceType, ConnectedDevice>,
-) -> Option<&ConnectedDevice> {
-    preferred_interface(connections.keys().copied())
-        .and_then(|interface| connections.get(&interface))
-}
-
-fn preferred_interface(interfaces: impl Iterator<Item = InterfaceType>) -> Option<InterfaceType> {
-    let interfaces = interfaces.collect::<HashSet<_>>();
-    [InterfaceType::USB, InterfaceType::WiFi]
-        .into_iter()
-        .find(|interface| interfaces.contains(interface))
-        .or_else(|| interfaces.into_iter().next())
+/// Poll one connection per device (USB first, then Wi-Fi), so a device
+/// attached over both does not feed history twice.
+fn preferred_connection<T>(connections: &HashMap<InterfaceType, T>) -> Option<&T> {
+    connections
+        .get(&InterfaceType::USB)
+        .or_else(|| connections.get(&InterfaceType::WiFi))
+        .or_else(|| connections.values().next())
 }
 
 pub fn start_device_sender(handle: AppHandle) -> async_runtime::JoinHandle<()> {
@@ -215,36 +207,28 @@ pub fn setup_device_listener(app: AppHandle) {
         let event = event.payload;
         let app_state = app.state::<DeviceState>();
 
-        use scopefn::Run;
-        let mut guard = match app_state.write() {
-            Ok(g) => g,
-            Err(e) => {
-                log::error!("DeviceState lock poisoned: {e}");
-                return;
-            }
+        let Ok(mut guard) = app_state.write() else {
+            log::error!("DeviceState lock poisoned");
+            return;
         };
-        guard
+        let (name, interfaces) = guard
             .entry(event.udid.clone())
-            .or_insert_with(|| (event.name.clone(), HashSet::new()))
-            .run(|e| match event.action {
-                Action::Attached => {
-                    if !event.name.is_empty() {
-                        e.0.clone_from(&event.name);
-                    }
-                    e.1.insert(event.interface);
+            .or_insert_with(|| (event.name.clone(), HashSet::new()));
+        match event.action {
+            Action::Attached => {
+                if !event.name.is_empty() {
+                    name.clone_from(&event.name);
                 }
-                Action::Detached => {
-                    e.1.remove(&event.interface);
-                    if e.1.is_empty() {
-                        // Keep the map entry so name lookup still works briefly;
-                        // empty interface set is the offline signal for the UI.
-                    }
-                }
-                _ => (),
-            });
-        let should_cleanup = guard
-            .get(&event.udid)
-            .is_some_and(|(_, interfaces)| interfaces.is_empty());
+                interfaces.insert(event.interface);
+            }
+            Action::Detached => {
+                interfaces.remove(&event.interface);
+            }
+            _ => (),
+        }
+        // An empty interface set is the "offline" signal for the UI; keep the
+        // entry for a while so the name can still be looked up.
+        let should_cleanup = interfaces.is_empty();
         drop(guard);
 
         if should_cleanup {
@@ -271,14 +255,10 @@ mod tests {
 
     #[test]
     fn usb_is_preferred_and_wifi_is_the_fallback() {
-        assert_eq!(
-            preferred_interface([InterfaceType::WiFi, InterfaceType::USB].into_iter()),
-            Some(InterfaceType::USB)
-        );
-        assert_eq!(
-            preferred_interface([InterfaceType::WiFi].into_iter()),
-            Some(InterfaceType::WiFi)
-        );
-        assert_eq!(preferred_interface(std::iter::empty()), None);
+        let both = HashMap::from([(InterfaceType::WiFi, "wifi"), (InterfaceType::USB, "usb")]);
+        assert_eq!(preferred_connection(&both), Some(&"usb"));
+        let wifi = HashMap::from([(InterfaceType::WiFi, "wifi")]);
+        assert_eq!(preferred_connection(&wifi), Some(&"wifi"));
+        assert_eq!(preferred_connection::<&str>(&HashMap::new()), None);
     }
 }

@@ -78,7 +78,6 @@ with_repr! {
         pub full_charge_capacity: Option<i32>,
         pub remaining_capacity: Option<i32>,
         pub design_capacity: Option<i32>,
-        pub nominal_charge_capacity: Option<i32>,
     }
 
     #[out, serde(rename_all = "camelCase"), cfg_attr(feature = "specta", derive(specta::Type))]
@@ -189,7 +188,6 @@ impl From<repr::BatteryData> for BatteryData {
             full_charge_capacity: r.full_charge_capacity,
             remaining_capacity: r.remaining_capacity,
             design_capacity: r.design_capacity,
-            nominal_charge_capacity: r.nominal_charge_capacity,
         }
     }
 }

@@ -19,7 +19,7 @@ use tauri_plugin_pinia::ManagerExt;
 use tauri_specta::{collect_commands, collect_events};
 use tpower::ffi::InterfaceType;
 use tray_icon::setup_tray_icon;
-use util::setup_traffic_light_positioner;
+use util::{log_err, setup_traffic_light_positioner};
 
 mod database;
 pub mod device;
@@ -40,12 +40,6 @@ fn open_app(app: AppHandle) {
     }
 }
 
-fn log_err<T, E: std::fmt::Display>(result: Result<T, E>, what: &str) {
-    if let Err(e) = result {
-        log::error!("failed to {what}: {e}");
-    }
-}
-
 pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(main) = app.main_window() {
         log_err(main.show(), "show main window");
@@ -57,9 +51,25 @@ pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     );
 }
 
+/// Hide the main window and drop the Dock icon; the app keeps running in the
+/// menu bar.
+fn hide_main_window<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(main) = app.main_window() {
+        log_err(main.hide(), "hide main window");
+    }
+    log_err(
+        app.set_activation_policy(ActivationPolicy::Accessory),
+        "set activation policy",
+    );
+}
+
 #[tauri::command]
 #[specta::specta]
 fn open_settings(app: AppHandle) {
+    open_settings_window(&app);
+}
+
+pub(crate) fn open_settings_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(settings) = app.settings_window() {
         log_err(settings.show(), "show settings window");
         log_err(settings.set_focus(), "focus settings window");
@@ -97,14 +107,16 @@ fn switch_theme(theme: Theme, app: AppHandle) {
         Theme::Dark => NSAppearance::appearanceNamed(unsafe { NSAppearanceNameVibrantDark }),
         Theme::System => None,
     };
-    app.webview_windows().values().for_each(|w| match w.ns_window() {
-        Ok(ns_window) => unsafe {
-            if let Some(w) = (ns_window as *mut NSWindow).as_ref() {
-                w.setAppearance(apprence.as_deref())
-            }
-        },
-        Err(e) => log::warn!("failed to apply window theme: {e}"),
-    });
+    app.webview_windows()
+        .values()
+        .for_each(|w| match w.ns_window() {
+            Ok(ns_window) => unsafe {
+                if let Some(w) = (ns_window as *mut NSWindow).as_ref() {
+                    w.setAppearance(apprence.as_deref())
+                }
+            },
+            Err(e) => log::warn!("failed to apply window theme: {e}"),
+        });
 }
 
 #[tauri::command]
@@ -217,11 +229,7 @@ pub fn run() {
                 .try_get::<bool>("preference", "hideOnStartup")
                 .unwrap_or(false);
             if hide_on_startup {
-                log_err(
-                    app.app_handle()
-                        .set_activation_policy(ActivationPolicy::Accessory),
-                    "set activation policy",
-                );
+                hide_main_window(app.app_handle());
             } else {
                 show_main_window(app.app_handle());
             }
@@ -250,13 +258,7 @@ fn handle_window_event(window: &Window, event: &WindowEvent) {
             WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
 
-                log_err(window.hide(), "hide main window");
-                log_err(
-                    window
-                        .app_handle()
-                        .set_activation_policy(ActivationPolicy::Accessory),
-                    "set activation policy",
-                );
+                hide_main_window(window.app_handle());
             }
             WindowEvent::ThemeChanged(theme) => {
                 println!("Theme changed to: {}", theme);

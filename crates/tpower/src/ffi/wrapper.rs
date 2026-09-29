@@ -83,7 +83,7 @@ impl Drop for ServiceConnection {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug)]
 pub struct Device {
     pub device: AMDeviceRef,
     pub udid: String,
@@ -212,19 +212,15 @@ impl Device {
         }
     }
 
+    /// Connect, pair if needed and start a session. On failure, `Drop` (or
+    /// the next `disconnect`) undoes whatever was set up.
     pub fn prepare_device(&mut self) -> Result<(), DeviceError> {
         self.connect()?;
-        let prepared = (|| {
-            if !self.is_paired() {
-                self.pair()?;
-            }
-            self.validate_pairing()?;
-            self.start_session()
-        })();
-        if prepared.is_err() {
-            self.disconnect();
+        if !self.is_paired() {
+            self.pair()?;
         }
-        prepared
+        self.validate_pairing()?;
+        self.start_session()
     }
 
     pub fn start_service(&self, service_name: &str) -> Result<ServiceConnection, DeviceError> {

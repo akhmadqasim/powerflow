@@ -121,7 +121,10 @@ brightnessPower: number;
 /**
  * 0 if not available
  */
-heatpipePower: number; batteryLevel: number; absoluteBatteryLevel: number; temperature: number; adapterWatts: number; adapterVoltage: number; adapterAmperage: number }) & { isLocal: boolean; isCharging: boolean; timeRemain: Duration; lastUpdate: number; adapterName: string | null; cycleCount: number; currentCapacity: number; maxCapacity: number; designCapacity?: number }
+heatpipePower: number; batteryLevel: number; absoluteBatteryLevel: number; temperature: number; adapterWatts: number; adapterVoltage: number; adapterAmperage: number }) & { isLocal: boolean; isCharging: boolean; /**
+ * `None` while the OS is still estimating.
+ */
+timeRemain: Duration | null; lastUpdate: number; adapterName: string | null; cycleCount: number; currentCapacity: number; maxCapacity: number; designCapacity?: number }
 export type PowerTickEvent = { data: NormalizedResource }
 export type PowerUpdatedEvent = string
 export type PreferenceEvent = { theme: Theme } | { animationsEnabled: boolean } | { updateInterval: number } | { language: string } | { statusBarItem: StatusBarItem } | { statusBarShowCharging: boolean } | { hideOnStartup: boolean }

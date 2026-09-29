@@ -200,7 +200,9 @@ fn int_from_bytes<const N: usize>(bytes: &[u8; 32]) -> u64 {
     if cfg!(target_arch = "x86_64") {
         buf.iter().fold(0, |acc, b| (acc << 8) | u64::from(*b))
     } else {
-        buf.iter().rev().fold(0, |acc, b| (acc << 8) | u64::from(*b))
+        buf.iter()
+            .rev()
+            .fold(0, |acc, b| (acc << 8) | u64::from(*b))
     }
 }
 
@@ -453,10 +455,7 @@ mod tests {
 
     #[test]
     fn decodes_float_and_missing_keys() {
-        assert_eq!(
-            val(b"flt ", 4, &1.5f32.to_ne_bytes()).value(),
-            Some(1.5)
-        );
+        assert_eq!(val(b"flt ", 4, &1.5f32.to_ne_bytes()).value(), Some(1.5));
         assert_eq!(val(b"\0\0\0\0", 0, &[]).value(), None);
     }
 

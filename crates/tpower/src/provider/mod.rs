@@ -33,7 +33,8 @@ pub mod remote;
 pub struct NormalizedResource {
     pub is_local: bool,
     pub is_charging: bool,
-    pub time_remain: Duration,
+    /// `None` while the OS is still estimating.
+    pub time_remain: Option<Duration>,
     pub last_update: i64,
     pub adapter_name: Option<String>,
     pub cycle_count: i32,
@@ -124,11 +125,22 @@ impl Deref for NormalizedResource {
 const MAX_PLAUSIBLE_MINUTES: f32 = 24.0 * 60.0;
 
 /// Convert a remaining-time value in minutes into a `Duration`, rejecting the
-/// "unknown" sentinels used by IOKit and the SMC. A zero duration means
-/// "unknown" to the frontend.
+/// "unknown" sentinels used by IOKit and the SMC.
 fn plausible_minutes(minutes: f32) -> Option<Duration> {
     (minutes.is_finite() && minutes > 0.0 && minutes <= MAX_PLAUSIBLE_MINUTES)
         .then(|| Duration::from_secs_f32(minutes * 60.0))
+}
+
+fn ioreg_time_remain(io: &IORegistry) -> Option<Duration> {
+    io.time_remaining.and_then(|m| plausible_minutes(m as f32))
+}
+
+fn smc_time_remain(smc: &SMCPowerData, is_charging: bool) -> Option<Duration> {
+    plausible_minutes(if is_charging {
+        smc.time_to_full
+    } else {
+        smc.time_to_empty
+    })
 }
 
 /// Battery charge as a percentage of max capacity. Prefers the mAh values and
@@ -136,57 +148,23 @@ fn plausible_minutes(minutes: f32) -> Option<Duration> {
 /// raw mAh keys are gone from the top level on macOS 27). Returns 0.0 instead
 /// of NaN / inf when nothing usable is present.
 fn absolute_battery_level(io: &IORegistry) -> f32 {
-    match (io.current_capacity_mah(), io.max_capacity_mah()) {
-        (Some(current), Some(max)) if max > 0 => current as f32 / max as f32 * 100.,
-        _ => match (io.current_capacity, io.max_capacity) {
-            (Some(current), Some(max)) if max > 0 => current as f32 / max as f32 * 100.,
-            (Some(current), _) => current as f32,
-            _ => 0.,
-        },
-    }
+    [
+        io.current_capacity_mah().zip(io.max_capacity_mah()),
+        io.current_capacity.zip(io.max_capacity),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|(_, max)| *max > 0)
+    .map_or(
+        io.current_capacity.unwrap_or_default() as f32,
+        |(current, max)| current as f32 / max as f32 * 100.,
+    )
 }
 
-/// Use `UpdateTime` when present, otherwise the current time, so consumers that
-/// de-duplicate samples by timestamp (history recorder) keep working.
-fn update_time_or_now(io: &IORegistry) -> i64 {
-    io.update_time.filter(|t| *t > 0).unwrap_or_else(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs() as i64)
-    })
-}
-
-/// Whether the local battery is being charged. The instantaneous amperage sign
-/// is the most reliable signal; SMC `CHCC` alone can stay set while the battery
-/// is discharging on an under-powered adapter (macOS 27).
-fn is_charging_local(io: &IORegistry, smc: &SMCPowerData) -> bool {
-    match io.instant_amperage.or(io.amperage) {
-        Some(amperage) if amperage != 0 => amperage > 0,
-        _ => io.is_charging.unwrap_or(false) || smc.is_charging(),
-    }
-}
-
-/// Prefer IOKit's `TimeRemaining`, which is refreshed every few seconds, over
-/// the SMC `B0TE` / `B0TF` keys that can stay stale for minutes on Apple
-/// silicon. Falls back to the SMC value that matches the charge direction.
-fn time_remain_local(io: &IORegistry, smc: &SMCPowerData, is_charging: bool) -> Duration {
-    io.time_remaining
-        .and_then(|m| plausible_minutes(m as f32))
-        .or_else(|| {
-            plausible_minutes(if is_charging {
-                smc.time_to_full
-            } else {
-                smc.time_to_empty
-            })
-        })
-        .unwrap_or_default()
-}
-
-fn adapter_name(io: &IORegistry) -> Option<String> {
-    io.adapter_details
-        .name
-        .clone()
-        .or_else(|| io.adapter_details.description.clone())
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 impl From<&IORegistry> for NormalizedResource {
@@ -206,19 +184,18 @@ impl From<&IORegistry> for NormalizedResource {
                 // iOS/iPadOS: no PowerTelemetryData, estimate from
                 // InstantAmperage (mA) x Voltage (mV).
                 let amperage = io.instant_amperage.or(io.amperage).unwrap_or_default();
-                let voltage = io.voltage.or(io.apple_raw_battery_voltage).unwrap_or_default();
+                let voltage = io
+                    .voltage
+                    .or(io.apple_raw_battery_voltage)
+                    .unwrap_or_default();
                 let battery_power = (amperage.unsigned_abs() as f32 * voltage as f32) / 1_000_000.0;
-                let adapter_watts = io.adapter_details.watts.unwrap_or_default() as f32;
-                let system_in = if is_charging {
-                    adapter_watts.max(battery_power)
-                } else {
-                    0.0
-                };
-                let system_load = if is_charging {
+                let (system_in, system_load) = if is_charging {
                     // adapter input - battery charging power
-                    (system_in - battery_power).max(0.0)
+                    let system_in =
+                        (io.adapter_details.watts.unwrap_or_default() as f32).max(battery_power);
+                    (system_in, (system_in - battery_power).max(0.0))
                 } else {
-                    battery_power
+                    (0.0, battery_power)
                 };
                 (system_in, system_load, battery_power, system_in, 0.0)
             };
@@ -226,12 +203,13 @@ impl From<&IORegistry> for NormalizedResource {
         Self {
             is_local: false,
             is_charging,
-            time_remain: io
-                .time_remaining
-                .and_then(|m| plausible_minutes(m as f32))
-                .unwrap_or_default(),
-            last_update: update_time_or_now(io),
-            adapter_name: adapter_name(io),
+            time_remain: ioreg_time_remain(io),
+            last_update: io.update_time.filter(|t| *t > 0).unwrap_or_else(now_secs),
+            adapter_name: io
+                .adapter_details
+                .name
+                .clone()
+                .or_else(|| io.adapter_details.description.clone()),
             cycle_count: io.cycle_count.unwrap_or_default(),
             max_capacity: io.max_capacity_mah().unwrap_or_default(),
             design_capacity: io.design_capacity_mah().unwrap_or_default(),
@@ -257,63 +235,41 @@ impl From<&IORegistry> for NormalizedResource {
     }
 }
 
-impl From<(&IORegistry, &SMCPowerData)> for NormalizedResource {
-    fn from((io, smc): (&IORegistry, &SMCPowerData)) -> Self {
-        let is_charging = is_charging_local(io, smc);
-        let efficiency_loss = io
-            .ptd()
-            .map_or(0.0, |d| d.adapter_efficiency_loss as f32 / 1000.);
-        let mut resource = Self::from(smc);
-        resource.last_update = update_time_or_now(io);
-        resource.is_charging = is_charging;
-        resource.time_remain = time_remain_local(io, smc, is_charging);
-        resource.adapter_name = adapter_name(io);
-        resource.cycle_count = io.cycle_count.unwrap_or_default();
-        resource.max_capacity = io.max_capacity_mah().unwrap_or_default();
-        resource.design_capacity = io.design_capacity_mah().unwrap_or_default();
-        resource.current_capacity = io.current_capacity_mah().unwrap_or_default();
-        resource.data = NormalizedData {
-            efficiency_loss,
-            adapter_power: smc.delivery_rate + efficiency_loss,
-            battery_level: io.current_capacity.unwrap_or_default(),
-            absolute_battery_level: absolute_battery_level(io),
-            adapter_watts: io.adapter_details.watts.unwrap_or_default() as f32,
-            adapter_voltage: io.adapter_details.adapter_voltage.unwrap_or_default() as f32 / 1000.,
-            adapter_amperage: io.adapter_details.current.unwrap_or_default() as f32 / 1000.,
-            ..resource.data
-        };
-        resource
-    }
-}
-
-/// Local sample built from SMC data only, for Macs without an
-/// `AppleSmartBattery` (Mac mini / Mac Pro / iMac) or when IORegistry cannot
-/// be read.
-impl From<&SMCPowerData> for NormalizedResource {
-    fn from(smc: &SMCPowerData) -> Self {
-        let is_charging = smc.is_charging();
-        Self {
-            is_local: true,
-            is_charging,
-            time_remain: plausible_minutes(if is_charging {
-                smc.time_to_full
-            } else {
-                smc.time_to_empty
-            })
-            .unwrap_or_default(),
-            last_update: update_time_or_now(&IORegistry::default()),
-            data: NormalizedData {
-                system_in: smc.delivery_rate,
-                system_load: smc.system_total,
-                battery_power: smc.battery_rate.max(smc.delivery_rate - smc.system_total),
-                adapter_power: smc.delivery_rate,
-                brightness_power: smc.brightness,
-                heatpipe_power: smc.heatpipe,
-                temperature: smc.temperature,
-                ..Default::default()
-            },
+impl NormalizedResource {
+    /// Build a sample for this Mac from whichever sources are available: the
+    /// `AppleSmartBattery` IORegistry entry (absent on desktop Macs) and the
+    /// SMC (power rails, temperature).
+    pub fn local(io: Option<&IORegistry>, smc: Option<&SMCPowerData>) -> Self {
+        let mut resource = io.map(Self::from).unwrap_or_else(|| Self {
+            last_update: now_secs(),
             ..Default::default()
+        });
+        resource.is_local = true;
+
+        if let Some(smc) = smc {
+            // The amperage sign is the most reliable charging signal; SMC
+            // `CHCC` can stay set while the battery drains on an
+            // under-powered adapter (macOS 27).
+            resource.is_charging = match io.and_then(|io| io.instant_amperage.or(io.amperage)) {
+                Some(amperage) if amperage != 0 => amperage > 0,
+                _ => resource.is_charging || smc.is_charging(),
+            };
+            // IOKit's `TimeRemaining` is refreshed every few seconds, while
+            // the SMC `B0TE` / `B0TF` keys can stay stale for minutes.
+            resource.time_remain = io
+                .and_then(ioreg_time_remain)
+                .or_else(|| smc_time_remain(smc, resource.is_charging));
+
+            let data = &mut resource.data;
+            data.system_in = smc.delivery_rate;
+            data.system_load = smc.system_total;
+            data.battery_power = smc.battery_rate.max(smc.delivery_rate - smc.system_total);
+            data.adapter_power = smc.delivery_rate + data.efficiency_loss;
+            data.brightness_power = smc.brightness;
+            data.heatpipe_power = smc.heatpipe;
+            data.temperature = smc.temperature;
         }
+        resource
     }
 }
 
@@ -456,7 +412,7 @@ mod tests {
             charging_status: 1.0,
             ..Default::default()
         };
-        assert!(!is_charging_local(&io, &smc));
+        assert!(!NormalizedResource::local(Some(&io), Some(&smc)).is_charging);
     }
 
     #[test]

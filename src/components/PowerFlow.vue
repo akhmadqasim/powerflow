@@ -87,7 +87,7 @@ const power = usePower()
               :icon="Monitor"
               color="text-blue-500"
             >
-              {{ formatter.format(power.brightnessPower || 0) }}
+              {{ formatter.format(power.brightnessPower) }}
             </FlowItem>
 
             <FlowItem :tooltip="$t('flow.heatpipe_power')" :icon="Cpu" color="text-indigo-500">

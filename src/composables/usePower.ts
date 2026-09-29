@@ -132,14 +132,13 @@ const currentPower = computed<RawPowerData>(() => {
 
 export function usePower() {
   return computed(() => {
-    const data = currentPower.value.data ?? emptyPower
-    const hasData = data != null && Object.keys(data).length > 0
+    const { data, statistics } = currentPower.value
     return {
       ...data,
       // Keep last known values when the window is hidden — don't flash skeletons.
-      isLoading: !hasData,
+      isLoading: Object.keys(data).length === 0,
       isRemote: tab.value !== 'local',
-      statistics: currentPower.value.statistics ?? [],
+      statistics,
     }
   })
 }
