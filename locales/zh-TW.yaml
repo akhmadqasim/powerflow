@@ -19,6 +19,7 @@ status:
   to_full: 已充滿
   to_empty: 電量耗盡
   fully_charged: 完全充滿
+  calculating: 計算中…
   battery_in: 使用電池
   power_loss: 耗損
   screen_power: 螢幕

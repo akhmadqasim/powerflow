@@ -26,9 +26,20 @@ export const usePreference = defineStore('preference', () => {
   },
 })
 
+const VALID_STATUS_BAR_ITEMS: StatusBarItem[] = ['system', 'screen', 'heatpipe']
+const MIN_INTERVAL = 500
+const MAX_INTERVAL = 60_000
+
 export function usePreferenceAsync() {
   const preference = usePreference()
   const isLoading = ref(true)
-  preference.$tauri.start().then(() => isLoading.value = false)
+  preference.$tauri.start().then(() => {
+    // Sanitize values persisted by older or buggy builds.
+    if (!VALID_STATUS_BAR_ITEMS.includes(preference.statusBarItem))
+      preference.statusBarItem = 'system'
+    if (!(preference.updateInterval >= MIN_INTERVAL && preference.updateInterval <= MAX_INTERVAL))
+      preference.updateInterval = 2000
+    isLoading.value = false
+  })
   return { preference, isLoading }
 }
