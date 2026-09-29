@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use sqlx::{
     migrate, query, query_as,
-    sqlite::{SqliteConnectOptions, SqliteQueryResult},
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteQueryResult},
     SqlitePool,
 };
 use tauri::{
@@ -107,7 +107,15 @@ pub fn setup_database(app: AppHandle) -> anyhow::Result<()> {
                     log::error!(
                         "Persistent history database unavailable ({error}); using in-memory history"
                     );
-                    let db = SqlitePool::connect("sqlite::memory:").await?;
+                    // An in-memory database lives only as long as its
+                    // connection, so keep exactly one open for good.
+                    let db = SqlitePoolOptions::new()
+                        .min_connections(1)
+                        .max_connections(1)
+                        .idle_timeout(None)
+                        .max_lifetime(None)
+                        .connect("sqlite::memory:")
+                        .await?;
                     migrate!().run(&db).await?;
                     db
                 }

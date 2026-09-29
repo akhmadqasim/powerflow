@@ -97,6 +97,10 @@ struct Sampler {
     smc: Option<SMCConnection>,
     next_smc_attempt: Instant,
     next_battery_attempt: Instant,
+    /// Set once AppleSmartBattery has been read; after that a failed read is
+    /// treated as transient and the tick is skipped, instead of emitting a
+    /// sample without battery data.
+    has_battery: bool,
 }
 
 impl Sampler {
@@ -105,6 +109,7 @@ impl Sampler {
             smc: None,
             next_smc_attempt: Instant::now(),
             next_battery_attempt: Instant::now(),
+            has_battery: false,
         }
     }
 
@@ -122,12 +127,21 @@ impl Sampler {
         let smc = self.smc.as_mut().map(SMCReadSensor::read_sensor);
 
         let ioreg = if now >= self.next_battery_attempt {
-            get_mac_ioreg()
-                .inspect_err(|e| {
+            match get_mac_ioreg() {
+                Ok(io) => {
+                    self.has_battery = true;
+                    Some(io)
+                }
+                Err(e) if self.has_battery => {
+                    log::warn!("failed to read AppleSmartBattery, skipping sample: {e:#}");
+                    return None;
+                }
+                Err(e) => {
                     log::warn!("AppleSmartBattery unavailable ({e:#}), retrying later");
                     self.next_battery_attempt = now + SOURCE_RETRY_INTERVAL;
-                })
-                .ok()
+                    None
+                }
+            }
         } else {
             None
         };

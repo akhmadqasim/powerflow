@@ -136,11 +136,12 @@ fn ioreg_time_remain(io: &IORegistry) -> Option<Duration> {
 }
 
 fn smc_time_remain(smc: &SMCPowerData, is_charging: bool) -> Option<Duration> {
-    plausible_minutes(if is_charging {
+    if is_charging {
         smc.time_to_full
     } else {
         smc.time_to_empty
-    })
+    }
+    .and_then(plausible_minutes)
 }
 
 /// Battery charge as a percentage of max capacity. Prefers the mAh values and
@@ -260,14 +261,22 @@ impl NormalizedResource {
                 .and_then(ioreg_time_remain)
                 .or_else(|| smc_time_remain(smc, resource.is_charging));
 
+            // Only override IORegistry values with SMC keys this Mac has.
             let data = &mut resource.data;
-            data.system_in = smc.delivery_rate;
-            data.system_load = smc.system_total;
-            data.battery_power = smc.battery_rate.max(smc.delivery_rate - smc.system_total);
-            data.adapter_power = smc.delivery_rate + data.efficiency_loss;
-            data.brightness_power = smc.brightness;
-            data.heatpipe_power = smc.heatpipe;
-            data.temperature = smc.temperature;
+            if let Some(delivery) = smc.delivery_rate {
+                data.system_in = delivery;
+                data.adapter_power = delivery + data.efficiency_loss;
+            }
+            if let Some(total) = smc.system_total {
+                data.system_load = total;
+            }
+            let net = smc.delivery_rate.zip(smc.system_total).map(|(d, t)| d - t);
+            if let Some(battery) = smc.battery_rate.into_iter().chain(net).reduce(f32::max) {
+                data.battery_power = battery;
+            }
+            data.brightness_power = smc.brightness.unwrap_or(data.brightness_power);
+            data.heatpipe_power = smc.heatpipe.unwrap_or(data.heatpipe_power);
+            data.temperature = smc.temperature.unwrap_or(data.temperature);
         }
         resource
     }
@@ -409,10 +418,31 @@ mod tests {
             ..Default::default()
         };
         let smc = SMCPowerData {
-            charging_status: 1.0,
+            charging_status: Some(1.0),
             ..Default::default()
         };
         assert!(!NormalizedResource::local(Some(&io), Some(&smc)).is_charging);
+    }
+
+    #[test]
+    fn missing_smc_keys_keep_ioregistry_values() {
+        let io = IORegistry {
+            power_telemetry_data: Some(crate::de::PowerTelemetryData {
+                system_load: 7000,
+                system_power_in: 20000,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let smc = SMCPowerData {
+            heatpipe: Some(2.0),
+            ..Default::default()
+        };
+        let r = NormalizedResource::local(Some(&io), Some(&smc));
+        assert_eq!(
+            (r.system_load, r.system_in, r.heatpipe_power),
+            (7.0, 20.0, 2.0)
+        );
     }
 
     #[test]

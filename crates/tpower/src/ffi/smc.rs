@@ -31,6 +31,7 @@ impl SMCReadSensor for SMCConnection {
             .into_iter()
             .fold(SMCPowerData::default(), |mut acc, key| {
                 if let Ok(Some(val)) = self.read_key(key).map(|v| v.value()) {
+                    let val = Some(val);
                     match key {
                         "PPBR" => acc.battery_rate = val,
                         "PDTR" => acc.delivery_rate = val,
@@ -52,26 +53,28 @@ impl SMCReadSensor for SMCConnection {
     }
 }
 
+/// SMC readings; `None` when the key does not exist on this Mac or could not
+/// be read, so callers can fall back to other sources instead of using 0.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct SMCPowerData {
-    pub battery_rate: f32,
-    pub delivery_rate: f32,
-    pub system_total: f32,
-    pub heatpipe: f32,
-    pub brightness: f32,
-    pub full_charge_capacity: f32,
-    pub current_capacity: f32,
-    pub charging_status: f32,
-    pub time_to_empty: f32,
-    pub time_to_full: f32,
-    pub temperature: f32,
+    pub battery_rate: Option<f32>,
+    pub delivery_rate: Option<f32>,
+    pub system_total: Option<f32>,
+    pub heatpipe: Option<f32>,
+    pub brightness: Option<f32>,
+    pub full_charge_capacity: Option<f32>,
+    pub current_capacity: Option<f32>,
+    pub charging_status: Option<f32>,
+    pub time_to_empty: Option<f32>,
+    pub time_to_full: Option<f32>,
+    pub temperature: Option<f32>,
 }
 
 impl SMCPowerData {
     pub fn is_charging(&self) -> bool {
-        self.charging_status > f32::EPSILON
+        self.charging_status.is_some_and(|v| v > f32::EPSILON)
     }
 }
 

@@ -126,6 +126,8 @@ extern "C" {
         key: CFStringRef,
     ) -> *const c_void;
     pub fn AMDeviceGetInterfaceType(device: AMDeviceRef) -> InterfaceType;
+    pub fn AMDeviceRetain(device: AMDeviceRef) -> AMDeviceRef;
+    pub fn AMDeviceRelease(device: AMDeviceRef);
     pub fn AMDeviceConnect(device: AMDeviceRef) -> i32;
     pub fn AMDeviceDisconnect(device: AMDeviceRef) -> i32;
     pub fn AMDeviceIsPaired(device: AMDeviceRef) -> i32;

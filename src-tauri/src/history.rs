@@ -185,8 +185,9 @@ fn spawn_history_recorder(
                     continue;
                 }
                 // Preserve terminal transitions (full charge/unplug) even if
-                // the system clock moved backwards.
-                data.last_update = last.data.last_update;
+                // the system clock moved backwards; keep timestamps strictly
+                // increasing so the sample is not dropped as a duplicate.
+                data.last_update = last.data.last_update + 1;
             }
 
             let was_charging = staged

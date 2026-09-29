@@ -13,8 +13,8 @@ use crate::{
         AMDServiceConnectionInvalidate, AMDServiceConnectionReceiveMessage,
         AMDServiceConnectionRef, AMDServiceConnectionSendMessage, AMDeviceConnect,
         AMDeviceCopyDeviceIdentifier, AMDeviceCopyValue, AMDeviceDisconnect,
-        AMDeviceGetInterfaceType, AMDeviceIsPaired, AMDevicePair, AMDeviceRef,
-        AMDeviceSecureStartService, AMDeviceStartSession, AMDeviceStopSession,
+        AMDeviceGetInterfaceType, AMDeviceIsPaired, AMDevicePair, AMDeviceRef, AMDeviceRelease,
+        AMDeviceRetain, AMDeviceSecureStartService, AMDeviceStartSession, AMDeviceStopSession,
         AMDeviceValidatePairing, InterfaceType,
     },
 };
@@ -117,9 +117,13 @@ pub enum DeviceError {
 }
 
 impl Device {
+    /// Wrap `device`, taking a reference of our own: the notification's
+    /// reference is only guaranteed for the duration of the callback.
+    ///
     /// # Safety
     /// `device` must be a valid AMDeviceRef
     pub unsafe fn new(device: AMDeviceRef) -> Self {
+        let device = unsafe { AMDeviceRetain(device) };
         let id = unsafe { AMDeviceCopyDeviceIdentifier(device) };
         let udid = if id.is_null() {
             String::new()
@@ -231,5 +235,6 @@ impl Device {
 impl Drop for Device {
     fn drop(&mut self) {
         self.disconnect();
+        unsafe { AMDeviceRelease(self.device) };
     }
 }
