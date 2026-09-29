@@ -15,6 +15,7 @@ use objc2_app_kit::{
 use specta_typescript::{BigIntExportBehavior, Typescript};
 use sqlx::{Pool, Sqlite};
 use tauri::{ActivationPolicy, AppHandle, Manager, RunEvent, Runtime, State, Window, WindowEvent};
+use tauri_plugin_pinia::ManagerExt;
 use tauri_specta::{collect_commands, collect_events};
 use tpower::ffi::InterfaceType;
 use tray_icon::setup_tray_icon;
@@ -208,6 +209,22 @@ pub fn run() {
                 setup_traffic_light_positioner(main);
             }
 
+            // The main window starts hidden (see tauri.conf.json) so it can
+            // stay in the background when "hide on startup" is enabled.
+            let hide_on_startup = app
+                .app_handle()
+                .pinia()
+                .try_get::<bool>("preference", "hideOnStartup")
+                .unwrap_or(false);
+            if hide_on_startup {
+                log_err(
+                    app.app_handle()
+                        .set_activation_policy(ActivationPolicy::Accessory),
+                    "set activation policy",
+                );
+            } else {
+                show_main_window(app.app_handle());
+            }
 
             Ok(())
         })

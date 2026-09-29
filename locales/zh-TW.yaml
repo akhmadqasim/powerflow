@@ -63,6 +63,8 @@ settings:
   build: 構建
   license: 許可協議
   author: 作者
+  hide_on_startup: 啟動時隱藏視窗
+  hide_on_startup_desc: 啟動後僅顯示在選單列，不開啟主視窗
   version: 版本
 
 time:

@@ -41,6 +41,7 @@ pub enum PreferenceEvent {
     Language(String),
     StatusBarItem(StatusBarItem),
     StatusBarShowCharging(bool),
+    HideOnStartup(bool),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Event, Type)]

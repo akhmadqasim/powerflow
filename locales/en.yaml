@@ -68,6 +68,8 @@ settings:
   build: Build
   license: License
   author: Author
+  hide_on_startup: Hide Window on Startup
+  hide_on_startup_desc: Start in the menu bar without opening the main window
 
 time:
   minute: minute|minute|minutes
