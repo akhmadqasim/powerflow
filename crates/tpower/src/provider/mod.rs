@@ -13,7 +13,7 @@ use core_foundation::{
 };
 use derive_more::Add;
 use io_kit_sys::{
-    ret::kIOReturnSuccess, IOMasterPort, IORegistryEntryCreateCFProperties,
+    ret::kIOReturnSuccess, IOMasterPort, IOObjectRelease, IORegistryEntryCreateCFProperties,
     IOServiceGetMatchingService, IOServiceMatching,
 };
 use ratatui::widgets::SparklineBar;
@@ -101,7 +101,7 @@ impl Div<f32> for NormalizedData {
             efficiency_loss: self.efficiency_loss / rhs,
             brightness_power: self.brightness_power / rhs,
             heatpipe_power: self.heatpipe_power / rhs,
-            battery_level: self.battery_level / rhs as i32,
+            battery_level: (self.battery_level as f32 / rhs).round() as i32,
             absolute_battery_level: self.absolute_battery_level / rhs,
             temperature: self.temperature / rhs,
             adapter_watts: self.adapter_watts / rhs,
@@ -119,8 +119,79 @@ impl Deref for NormalizedResource {
     }
 }
 
+/// IOKit reports `-1` / `65535` in `TimeRemaining` while it is still
+/// computing an estimate; anything above a day is not a useful estimate either.
+const MAX_PLAUSIBLE_MINUTES: f32 = 24.0 * 60.0;
+
+/// Convert a remaining-time value in minutes into a `Duration`, rejecting the
+/// "unknown" sentinels used by IOKit and the SMC. A zero duration means
+/// "unknown" to the frontend.
+fn plausible_minutes(minutes: f32) -> Option<Duration> {
+    (minutes.is_finite() && minutes > 0.0 && minutes <= MAX_PLAUSIBLE_MINUTES)
+        .then(|| Duration::from_secs_f32(minutes * 60.0))
+}
+
+/// Battery charge as a percentage of max capacity. Prefers the mAh values and
+/// falls back to the `CurrentCapacity` / `MaxCapacity` percentage pair (the
+/// raw mAh keys are gone from the top level on macOS 27). Returns 0.0 instead
+/// of NaN / inf when nothing usable is present.
+fn absolute_battery_level(io: &IORegistry) -> f32 {
+    match (io.current_capacity_mah(), io.max_capacity_mah()) {
+        (Some(current), Some(max)) if max > 0 => current as f32 / max as f32 * 100.,
+        _ => match (io.current_capacity, io.max_capacity) {
+            (Some(current), Some(max)) if max > 0 => current as f32 / max as f32 * 100.,
+            (Some(current), _) => current as f32,
+            _ => 0.,
+        },
+    }
+}
+
+/// Use `UpdateTime` when present, otherwise the current time, so consumers that
+/// de-duplicate samples by timestamp (history recorder) keep working.
+fn update_time_or_now(io: &IORegistry) -> i64 {
+    io.update_time.filter(|t| *t > 0).unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64)
+    })
+}
+
+/// Whether the local battery is being charged. The instantaneous amperage sign
+/// is the most reliable signal; SMC `CHCC` alone can stay set while the battery
+/// is discharging on an under-powered adapter (macOS 27).
+fn is_charging_local(io: &IORegistry, smc: &SMCPowerData) -> bool {
+    match io.instant_amperage.or(io.amperage) {
+        Some(amperage) if amperage != 0 => amperage > 0,
+        _ => io.is_charging.unwrap_or(false) || smc.is_charging(),
+    }
+}
+
+/// Prefer IOKit's `TimeRemaining`, which is refreshed every few seconds, over
+/// the SMC `B0TE` / `B0TF` keys that can stay stale for minutes on Apple
+/// silicon. Falls back to the SMC value that matches the charge direction.
+fn time_remain_local(io: &IORegistry, smc: &SMCPowerData, is_charging: bool) -> Duration {
+    io.time_remaining
+        .and_then(|m| plausible_minutes(m as f32))
+        .or_else(|| {
+            plausible_minutes(if is_charging {
+                smc.time_to_full
+            } else {
+                smc.time_to_empty
+            })
+        })
+        .unwrap_or_default()
+}
+
+fn adapter_name(io: &IORegistry) -> Option<String> {
+    io.adapter_details
+        .name
+        .clone()
+        .or_else(|| io.adapter_details.description.clone())
+}
+
 impl From<&IORegistry> for NormalizedResource {
     fn from(io: &IORegistry) -> Self {
+        let is_charging = io.is_charging.unwrap_or_default();
         let (system_in, system_load, battery_power, adapter_power, efficiency_loss) =
             if let Some(d) = io.ptd() {
                 (
@@ -136,18 +207,17 @@ impl From<&IORegistry> for NormalizedResource {
 
         Self {
             is_local: false,
-            is_charging: io.is_charging,
-            time_remain: Duration::from_secs(io.time_remaining as u64 * 60),
-            last_update: io.update_time,
-            adapter_name: io
-                .adapter_details
-                .name
-                .clone()
-                .or_else(|| io.adapter_details.description.clone()),
-            cycle_count: io.cycle_count,
-            max_capacity: io.apple_raw_max_capacity,
-            design_capacity: io.design_capacity,
-            current_capacity: io.apple_raw_current_capacity,
+            is_charging,
+            time_remain: io
+                .time_remaining
+                .and_then(|m| plausible_minutes(m as f32))
+                .unwrap_or_default(),
+            last_update: update_time_or_now(io),
+            adapter_name: adapter_name(io),
+            cycle_count: io.cycle_count.unwrap_or_default(),
+            max_capacity: io.max_capacity_mah().unwrap_or_default(),
+            design_capacity: io.design_capacity_mah().unwrap_or_default(),
+            current_capacity: io.current_capacity_mah().unwrap_or_default(),
             data: NormalizedData {
                 system_in,
                 system_load,
@@ -156,11 +226,9 @@ impl From<&IORegistry> for NormalizedResource {
                 efficiency_loss,
                 brightness_power: 0.,
                 heatpipe_power: 0.,
-                battery_level: io.current_capacity,
-                absolute_battery_level: io.apple_raw_current_capacity as f32
-                    / io.apple_raw_max_capacity as f32
-                    * 100.,
-                temperature: io.temperature as f32 / 100.,
+                battery_level: io.current_capacity.unwrap_or_default(),
+                absolute_battery_level: absolute_battery_level(io),
+                temperature: io.temperature.unwrap_or_default() as f32 / 100.,
 
                 adapter_watts: io.adapter_details.watts.unwrap_or_default() as f32,
                 adapter_voltage: io.adapter_details.adapter_voltage.unwrap_or_default() as f32
@@ -173,49 +241,60 @@ impl From<&IORegistry> for NormalizedResource {
 
 impl From<(&IORegistry, &SMCPowerData)> for NormalizedResource {
     fn from((io, smc): (&IORegistry, &SMCPowerData)) -> Self {
+        let is_charging = is_charging_local(io, smc);
+        let efficiency_loss = io
+            .ptd()
+            .map_or(0.0, |d| d.adapter_efficiency_loss as f32 / 1000.);
+        let mut resource = Self::from(smc);
+        resource.last_update = update_time_or_now(io);
+        resource.is_charging = is_charging;
+        resource.time_remain = time_remain_local(io, smc, is_charging);
+        resource.adapter_name = adapter_name(io);
+        resource.cycle_count = io.cycle_count.unwrap_or_default();
+        resource.max_capacity = io.max_capacity_mah().unwrap_or_default();
+        resource.design_capacity = io.design_capacity_mah().unwrap_or_default();
+        resource.current_capacity = io.current_capacity_mah().unwrap_or_default();
+        resource.data = NormalizedData {
+            efficiency_loss,
+            adapter_power: smc.delivery_rate + efficiency_loss,
+            battery_level: io.current_capacity.unwrap_or_default(),
+            absolute_battery_level: absolute_battery_level(io),
+            adapter_watts: io.adapter_details.watts.unwrap_or_default() as f32,
+            adapter_voltage: io.adapter_details.adapter_voltage.unwrap_or_default() as f32 / 1000.,
+            adapter_amperage: io.adapter_details.current.unwrap_or_default() as f32 / 1000.,
+            ..resource.data
+        };
+        resource
+    }
+}
+
+/// Local sample built from SMC data only, for Macs without an
+/// `AppleSmartBattery` (Mac mini / Mac Pro / iMac) or when IORegistry cannot
+/// be read.
+impl From<&SMCPowerData> for NormalizedResource {
+    fn from(smc: &SMCPowerData) -> Self {
+        let is_charging = smc.is_charging();
         Self {
             is_local: true,
-            last_update: io.update_time,
-            is_charging: smc.is_charging(),
-            time_remain: Duration::from_secs_f32(
-                60.0 * if smc.is_charging() {
-                    smc.time_to_full
-                } else {
-                    smc.time_to_empty
-                },
-            ),
-            adapter_name: io
-                .adapter_details
-                .name
-                .clone()
-                .or_else(|| io.adapter_details.description.clone()),
-            cycle_count: io.cycle_count,
-            max_capacity: io.apple_raw_max_capacity,
-            design_capacity: io.design_capacity,
-            current_capacity: io.apple_raw_current_capacity,
+            is_charging,
+            time_remain: plausible_minutes(if is_charging {
+                smc.time_to_full
+            } else {
+                smc.time_to_empty
+            })
+            .unwrap_or_default(),
+            last_update: update_time_or_now(&IORegistry::default()),
             data: NormalizedData {
                 system_in: smc.delivery_rate,
                 system_load: smc.system_total,
                 battery_power: smc.battery_rate.max(smc.delivery_rate - smc.system_total),
-                efficiency_loss: io
-                    .ptd()
-                    .map_or(0.0, |d| d.adapter_efficiency_loss as f32 / 1000.),
+                adapter_power: smc.delivery_rate,
                 brightness_power: smc.brightness,
                 heatpipe_power: smc.heatpipe,
-                battery_level: io.current_capacity,
-                absolute_battery_level: io.apple_raw_current_capacity as f32
-                    / io.apple_raw_max_capacity as f32
-                    * 100.,
                 temperature: smc.temperature,
-                adapter_power: smc.delivery_rate
-                    + io.ptd()
-                        .map_or(0.0, |d| d.adapter_efficiency_loss as f32 / 1000.),
-
-                adapter_watts: io.adapter_details.watts.unwrap_or_default() as f32,
-                adapter_voltage: io.adapter_details.adapter_voltage.unwrap_or_default() as f32
-                    / 1000.,
-                adapter_amperage: io.adapter_details.current.unwrap_or_default() as f32 / 1000.,
+                ..Default::default()
             },
+            ..Default::default()
         }
     }
 }
@@ -228,13 +307,21 @@ pub fn get_mac_ioreg_dict() -> anyhow::Result<CFDictionary> {
     let name = CString::new("AppleSmartBattery").unwrap();
     let matching_dict = unsafe { IOServiceMatching(name.as_ptr()) };
 
-    let result = unsafe { IOServiceGetMatchingService(master_port, matching_dict) };
+    // Consumes `matching_dict`; returns 0 on Macs without a battery.
+    let service = unsafe { IOServiceGetMatchingService(master_port, matching_dict) };
+    if service == 0 {
+        bail!("AppleSmartBattery service not found");
+    }
 
     let mut properties: CFMutableDictionaryRef = unsafe { mem::zeroed() };
-    if unsafe { IORegistryEntryCreateCFProperties(result, &mut properties, kCFAllocatorDefault, 0) }
-        != kIOReturnSuccess
-    {
-        bail!("could not get properties");
+    let status = unsafe {
+        IORegistryEntryCreateCFProperties(service, &mut properties, kCFAllocatorDefault, 0)
+    };
+    // IOServiceGetMatchingService returns a retained object.
+    unsafe { IOObjectRelease(service) };
+
+    if status != kIOReturnSuccess || properties.is_null() {
+        bail!("could not get AppleSmartBattery properties (status={status})");
     }
 
     unsafe { Ok(CFDictionary::wrap_under_create_rule(properties)) }
@@ -242,7 +329,7 @@ pub fn get_mac_ioreg_dict() -> anyhow::Result<CFDictionary> {
 
 pub fn get_mac_ioreg() -> anyhow::Result<IORegistry> {
     let dic = get_mac_ioreg_dict()?;
-    unsafe { mem::transmute(dict_into::<repr::IORegistry>(dic)) }
+    Ok(dict_into::<repr::IORegistry>(dic)?.into())
 }
 
 #[derive(Debug)]
@@ -324,5 +411,84 @@ impl PowerStatistic {
         skip_until(self.system_history.iter(), width)
             .map(|v| SparklineBar::from(*v))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::de::BatteryData;
+
+    #[test]
+    fn rejects_remaining_time_sentinels() {
+        assert_eq!(plausible_minutes(-1.0), None);
+        assert_eq!(plausible_minutes(65_535.0), None);
+        assert_eq!(plausible_minutes(24.0 * 60.0 + 1.0), None);
+        assert_eq!(plausible_minutes(90.0), Some(Duration::from_secs(5_400)));
+    }
+
+    #[test]
+    fn amperage_overrides_stale_smc_charging_flag() {
+        let io = IORegistry {
+            instant_amperage: Some(-250),
+            is_charging: Some(true),
+            ..Default::default()
+        };
+        let smc = SMCPowerData {
+            charging_status: 1.0,
+            ..Default::default()
+        };
+        assert!(!is_charging_local(&io, &smc));
+    }
+
+    #[test]
+    fn capacity_prefers_nested_battery_data() {
+        // macOS 27: top-level AppleRaw* / DesignCapacity are gone.
+        let io = IORegistry {
+            battery_data: Some(BatteryData {
+                full_charge_capacity: Some(4489),
+                remaining_capacity: Some(2889),
+                design_capacity: Some(5760),
+                ..Default::default()
+            }),
+            current_capacity: Some(65),
+            max_capacity: Some(100),
+            ..Default::default()
+        };
+        let r = NormalizedResource::from(&io);
+        assert_eq!(
+            (r.max_capacity, r.current_capacity, r.design_capacity),
+            (4489, 2889, 5760)
+        );
+        assert!((r.absolute_battery_level - 64.357).abs() < 0.01);
+    }
+
+    #[test]
+    fn capacity_falls_back_to_legacy_keys_and_percentages() {
+        let io = IORegistry {
+            apple_raw_max_capacity: Some(6400),
+            apple_raw_current_capacity: Some(3200),
+            design_capacity: Some(6250),
+            ..Default::default()
+        };
+        let r = NormalizedResource::from(&io);
+        assert_eq!(
+            (r.max_capacity, r.current_capacity, r.design_capacity),
+            (6400, 3200, 6250)
+        );
+        assert_eq!(r.absolute_battery_level, 50.0);
+
+        let io = IORegistry {
+            current_capacity: Some(75),
+            max_capacity: Some(100),
+            ..Default::default()
+        };
+        assert_eq!(absolute_battery_level(&io), 75.0);
+        assert_eq!(absolute_battery_level(&IORegistry::default()), 0.0);
+    }
+
+    #[test]
+    fn missing_update_time_uses_current_time() {
+        assert!(NormalizedResource::from(&IORegistry::default()).last_update > 0);
     }
 }
