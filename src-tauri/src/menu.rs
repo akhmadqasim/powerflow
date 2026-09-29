@@ -73,13 +73,14 @@ pub fn setup_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
 pub fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
     // event.emit(app).unwrap();
     match event {
-        MenuEvent::Preferences => {
-            app.get_or_create_window("settings")
-                .unwrap()
-                .0
-                .show()
-                .unwrap();
-        }
+        MenuEvent::Preferences => match app.get_or_create_window("settings") {
+            Ok((window, _)) => {
+                if let Err(e) = window.show() {
+                    log::error!("failed to show settings window: {e}");
+                }
+            }
+            Err(e) => log::error!("failed to create settings window: {e}"),
+        },
         MenuEvent::Close => {
             app.exit(0);
         }
