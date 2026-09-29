@@ -194,6 +194,7 @@ impl From<&IORegistry> for NormalizedResource {
         let is_charging = io.is_charging.unwrap_or_default();
         let (system_in, system_load, battery_power, adapter_power, efficiency_loss) =
             if let Some(d) = io.ptd() {
+                // macOS: use PowerTelemetryData
                 (
                     d.system_power_in as f32 / 1000.,
                     d.system_load as f32 / 1000.,
@@ -202,7 +203,24 @@ impl From<&IORegistry> for NormalizedResource {
                     d.adapter_efficiency_loss as f32 / 1000.,
                 )
             } else {
-                Default::default()
+                // iOS/iPadOS: no PowerTelemetryData, estimate from
+                // InstantAmperage (mA) x Voltage (mV).
+                let amperage = io.instant_amperage.or(io.amperage).unwrap_or_default();
+                let voltage = io.voltage.or(io.apple_raw_battery_voltage).unwrap_or_default();
+                let battery_power = (amperage.unsigned_abs() as f32 * voltage as f32) / 1_000_000.0;
+                let adapter_watts = io.adapter_details.watts.unwrap_or_default() as f32;
+                let system_in = if is_charging {
+                    adapter_watts.max(battery_power)
+                } else {
+                    0.0
+                };
+                let system_load = if is_charging {
+                    // adapter input - battery charging power
+                    (system_in - battery_power).max(0.0)
+                } else {
+                    battery_power
+                };
+                (system_in, system_load, battery_power, system_in, 0.0)
             };
 
         Self {
@@ -490,5 +508,18 @@ mod tests {
     #[test]
     fn missing_update_time_uses_current_time() {
         assert!(NormalizedResource::from(&IORegistry::default()).last_update > 0);
+    }
+
+    #[test]
+    fn ios_power_is_estimated_without_telemetry() {
+        let io = IORegistry {
+            instant_amperage: Some(-500),
+            voltage: Some(4000),
+            is_charging: Some(false),
+            ..Default::default()
+        };
+        let r = NormalizedResource::from(&io);
+        assert_eq!(r.battery_power, 2.0);
+        assert_eq!(r.system_load, 2.0);
     }
 }
