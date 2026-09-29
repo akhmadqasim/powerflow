@@ -109,7 +109,7 @@ extern "C" {
         unknown1: i32,
         context: *mut c_void,
         notification: *mut AMDeviceNotification,
-    );
+    ) -> i32;
     pub fn AMDeviceNotificationUnsubscribe(notification: *mut c_void);
     pub fn AMDeviceNotificationSubscribeWithOptions(
         callback: AMDeviceNotificationCallback,
@@ -137,7 +137,7 @@ extern "C" {
         device: AMDeviceRef,
         service_name: CFStringRef,
         options: CFDictionaryRef,
-        service_connection: *const AMDServiceConnectionRef,
+        service_connection: *mut AMDServiceConnectionRef,
     ) -> i32;
     pub fn AMDServiceConnectionInvalidate(connection: AMDServiceConnectionRef);
     pub fn AMDServiceConnectionSendMessage(
@@ -147,7 +147,7 @@ extern "C" {
     ) -> i32;
     pub fn AMDServiceConnectionReceiveMessage(
         connection: AMDServiceConnectionRef,
-        response: *const CFDictionaryRef,
+        response: *mut CFDictionaryRef,
         format: *const CFPropertyListFormat,
         unknown0: *const c_void,
         unknown1: *const c_void,
